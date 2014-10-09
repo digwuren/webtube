@@ -57,7 +57,7 @@ class WEBrick::HTTPServer
       response['Upgrade'] = 'websocket'
       response['Sec-WebSocket-Accept'] = Digest::SHA1.base64digest(
           request['Sec-WebSocket-Key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
-      response['Sec-WebSocket-Verison'] = '13'
+      response['Sec-WebSocket-Version'] = '13'
       response.keep_alive = false
           # so that WEBrick will close the TCP socket when we're done
       (class << response; self; end).instance_eval do
