@@ -1,0 +1,6 @@
+GPL-3
+Manifest.txt
+webtube
+webtube.gemspec
+webtube.rb
+webtube/webrick.rb
