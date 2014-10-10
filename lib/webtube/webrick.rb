@@ -42,7 +42,7 @@ class WEBrick::HTTPServer
   #
   # See [[Webtube::new]] for a list of the supported methods for the
   # [[listener]].
-  def accept_webtube request, response, listener
+  def self::accept_webtube request, response, listener
     # Check that the client speaks our version
     unless (request['Sec-WebSocket-Version'] || '').split(/\s*,\s*/).
         include? '13' then
