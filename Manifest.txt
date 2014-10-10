@@ -2,5 +2,6 @@ GPL-3
 Manifest.txt
 bin/wsc
 lib/webtube.rb
+lib/webtube/vital-statistics.rb
 lib/webtube/webrick.rb
 webtube.gemspec
