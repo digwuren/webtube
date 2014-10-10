@@ -42,17 +42,25 @@ class Webtube
       return
     end
 
+    # Construct a list of all the currently living [[Webtube]] instances.  Note
+    # that while the operation is atomic, the Webtube infrastructure is
+    # inherently multithreaded, so the list can get slightly stale immediately
+    # and should, in most contexts, be considered informative.
+    def to_a
+      return @mutex.synchronize{@webtubes.to_a}
+    end
+    
     # The default status code in a shutdown situation is 1001 'going away'.
     def close_all status_code = 1001, explanation = ""
       # Note that we're only mutexing off extracting the content of
-      # [[@webtubes]].  We can't mutex the whole block, for as the webtubes
-      # will be closing, they'll want to notify us about it, and that is also
-      # mutexed.
+      # [[@webtubes]] (see [[to_a]]).  We can't mutex the whole block, for as
+      # the webtubes will be closing, they'll want to notify us about it, and
+      # that is also mutexed.
       #
       # This is not as bad as it may sound, for the webserver shouldn't be
       # accepting new connections anymore anyway by the time it'll start
       # closing the old ones.
-      @mutex.synchronize{@webtubes.to_a}.each do |webtube|
+      self.to_a.each do |webtube|
         begin
           webtube.close status_code, explanation
         rescue Exception => e
