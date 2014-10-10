@@ -105,7 +105,7 @@ is the message opcode), and with [[***]] are miscellaneous other events.  Lines
 entered by user are sent to the server as text messages.  The user can invoke
 some special commands using the slash prefix:
 
-- [[/ping [message]]] sends a ping frame to the server,
+- [[/ping [message]]] sends a ping frame to the server.
 
 - [[/close [status [explanation]]]] sends a close frame to the server.  The
   status code is specified as an unsigned decimal number.
