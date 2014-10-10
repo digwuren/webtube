@@ -6,7 +6,7 @@ require 'base64'
 require 'getoptlong'
 require 'webtube'
 
-class Stop_Outthread < Exception
+class StopSendThread < Exception
 end
 
 # The events incoming over the WebSocket will be listened to by this object,
@@ -55,7 +55,7 @@ class << $listener = Object.new
 
   def onclose webtube
     puts "*** close"
-    $send_thread.raise Stop_Outthread
+    $send_thread.raise StopSendThread
     return
   end
 end
@@ -116,7 +116,7 @@ $webtube = Webtube::connect ARGV.first,
 
 # Show the HTTP response to the user
 
-# [[$listener]] will send us, via [[$send_thread]], the [[Stop_Outthread]]
+# [[$listener]] will send us, via [[$send_thread]], the [[StopSendThread]]
 # exception when the other side goes away.
 $send_thread = Thread.current
 
@@ -149,5 +149,5 @@ begin
   end
   $webtube.close
   $recv_thread.join
-rescue Stop_Outthread
+rescue StopSendThread
 end
