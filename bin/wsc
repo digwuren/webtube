@@ -101,11 +101,12 @@ end
 
 puts "Connecting to #{ARGV.first} ..."
 
-$webtube = Webtube::connect ARGV.first,
+$webtube = Webtube.connect ARGV.first,
     header_fields: $header,
     allow_opcodes: 1 .. 15,
     ssl_verify_mode: $insecure ? OpenSSL::SSL::VERIFY_NONE : nil,
     on_http_response: proc{ |response|
+      # Show the HTTP response to the user
       puts "| #{response.code} #{response.message}"
       response.each_key do |key|
         response.get_fields(key).each do |value|
@@ -114,8 +115,6 @@ $webtube = Webtube::connect ARGV.first,
       end
       puts
     }
-
-# Show the HTTP response to the user
 
 # [[$listener]] will send us, via [[$send_thread]], the [[StopSendThread]]
 # exception when the other side goes away.
