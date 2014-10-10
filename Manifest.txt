@@ -4,4 +4,5 @@ bin/wsc
 lib/webtube.rb
 lib/webtube/vital-statistics.rb
 lib/webtube/webrick.rb
+sample-server.rb
 webtube.gemspec
