@@ -6,7 +6,43 @@ require 'base64'
 require 'getoptlong'
 require 'webtube'
 
-class StopSendThread < Exception
+$header = {} # lowercased field name => value
+$insecure = false
+
+$0 = 'wsc' # for [[GetoptLong]] error reporting
+begin
+  GetoptLong.new(
+      ['--header', '-H', GetoptLong::REQUIRED_ARGUMENT],
+      ['--insecure', '-k', GetoptLong::NO_ARGUMENT],
+      ).each do |opt, arg|
+    case opt
+    when '--header' then
+      name, value = arg.split /\s*:\s*/, 2
+      if value.nil? then
+        $stderr.puts "wsc: colon missing in argument to --header"
+        exit 1
+      end
+      name.downcase!
+      if $header[name] then
+        # The value was specified multiple times.
+        $header[name] += ", " + value
+      else
+        $header[name] = value
+      end
+    when '--insecure' then
+      $insecure = true
+    else
+      raise 'assertion failed'
+    end
+  end
+rescue GetoptLong::Error => e
+  # no need to display; it has already been reported
+  exit 1
+end
+
+unless ARGV.length == 1 then
+  $stderr.puts "wsc: argument mismatch (exactly one needed)"
+  exit 1
 end
 
 # The events incoming over the WebSocket will be listened to by this object,
@@ -60,49 +96,14 @@ class << $listener = Object.new
   end
 end
 
-$header = {} # lowercased field name => value
-$insecure = false
-
-$0 = 'wsc' # for [[GetoptLong]] error reporting
-begin
-  GetoptLong.new(
-      ['--header', '-H', GetoptLong::REQUIRED_ARGUMENT],
-      ['--insecure', '-k', GetoptLong::NO_ARGUMENT],
-      ).each do |opt, arg|
-    case opt
-    when '--header' then
-      name, value = arg.split /\s*:\s*/, 2
-      if value.nil? then
-        $stderr.puts "wsc: colon missing in argument to --header"
-        exit 1
-      end
-      name.downcase!
-      if $header[name] then
-        # The value was specified multiple times.
-        $header[name] += ", " + value
-      else
-        $header[name] = value
-      end
-    when '--insecure' then
-      $insecure = true
-    else
-      raise 'assertion failed'
-    end
-  end
-rescue GetoptLong::Error => e
-  # no need to display; it has already been reported
-  exit 1
-end
-
-unless ARGV.length == 1 then
-  $stderr.puts "wsc: argument mismatch (exactly one needed)"
-  exit 1
+class StopSendThread < Exception
 end
 
 puts "Connecting to #{ARGV.first} ..."
 
 $webtube = Webtube::connect ARGV.first,
     header_fields: $header,
+    allow_opcodes: 1 .. 15,
     ssl_verify_mode: $insecure ? OpenSSL::SSL::VERIFY_NONE : nil,
     on_http_response: proc{ |response|
       puts "| #{response.code} #{response.message}"
@@ -125,6 +126,8 @@ $send_thread = Thread.current
 $recv_thread = Thread.new do
   $webtube.run $listener
 end
+
+# Now, read user input and interpret commands.
 
 begin
   until $stdin.eof? do
