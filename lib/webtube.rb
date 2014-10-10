@@ -332,8 +332,14 @@ class Webtube
     start_options[:verify_mode] = ssl_verify_mode if ssl and ssl_verify_mode
     http = Net::HTTP.start hturi.host, hturi.port, **start_options
 
-    response = http.get hturi.path + (hturi.query ? '?' + hturi.query : ""),
-        reqhdr
+    object_to_request = hturi.path
+    if object_to_request.empty? then
+      object_to_request = '/'
+    end
+    if hturi.query then
+      object_to_request += '?' + hturi.query
+    end
+    response = http.get object_to_request, reqhdr
     on_http_response.call response if on_http_response
 
     # Check that the server is seeing us now
