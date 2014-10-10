@@ -1,0 +1,153 @@
+#! /usr/bin/ruby
+
+# WebSocketCat, a primitive CLI tool for manually talking to WebSocket servers
+
+require 'base64'
+require 'getoptlong'
+require 'webtube'
+
+class Stop_Outthread < Exception
+end
+
+# The events incoming over the WebSocket will be listened to by this object,
+# and promptly shown to the user.
+
+class << $listener = Object.new
+  def onopen webtube
+    puts "*** open"
+    return
+  end
+
+  def onmessage webtube, content, opcode
+    if opcode == 1 then
+      puts "<<< #{content}"
+    else
+      puts "<#{opcode}< #{content.inspect}"
+    end
+    return
+  end
+
+  def onping webtube, frame
+    puts "*** ping #{frame.payload.inspect}"
+    return
+  end
+
+  def onpong webtube, frame
+    puts "*** pong #{frame.payload.inspect}"
+    return
+  end
+
+  def onannoyedclose webtube, frame
+    if frame.body.bytesize >= 2 then
+      status_code, = frame.body.unpack 'n'
+      message = frame.body.byteslice 2 .. -1
+      message.force_encoding 'UTF-8'
+      message.force_encoding 'ASCII-8BIT' unless message.valid_encoding?
+      message = nil if message.empty?
+    else
+      status_code = nil
+      message = nil
+    end
+    puts "*** annoyedclose #{status_code.inspect}" +
+        (message ? " #{message.inspect}" : '')
+    return
+  end
+
+  def onclose webtube
+    puts "*** close"
+    $send_thread.raise Stop_Outthread
+    return
+  end
+end
+
+$header = {} # lowercased field name => value
+$insecure = false
+
+$0 = 'wsc' # for [[GetoptLong]] error reporting
+begin
+  GetoptLong.new(
+      ['--header', '-H', GetoptLong::REQUIRED_ARGUMENT],
+      ['--insecure', '-k', GetoptLong::NO_ARGUMENT],
+      ).each do |opt, arg|
+    case opt
+    when '--header' then
+      name, value = arg.split /\s*:\s*/, 2
+      if value.nil? then
+        $stderr.puts "wsc: colon missing in argument to --header"
+        exit 1
+      end
+      name.downcase!
+      if $header[name] then
+        # The value was specified multiple times.
+        $header[name] += ", " + value
+      else
+        $header[name] = value
+      end
+    when '--insecure' then
+      $insecure = true
+    else
+      raise 'assertion failed'
+    end
+  end
+rescue GetoptLong::Error => e
+  # no need to display; it has already been reported
+  exit 1
+end
+
+unless ARGV.length == 1 then
+  $stderr.puts "wsc: argument mismatch (exactly one needed)"
+  exit 1
+end
+
+puts "Connecting to #{ARGV.first} ..."
+
+$webtube = Webtube::connect ARGV.first,
+    header_fields: $header,
+    ssl_verify_mode: $insecure ? OpenSSL::SSL::VERIFY_NONE : nil,
+    on_http_response: proc{ |response|
+      puts "| #{response.code} #{response.message}"
+      response.each_key do |key|
+        response.get_fields(key).each do |value|
+          puts "| #{key}: #{value}"
+        end
+      end
+      puts
+    }
+
+# Show the HTTP response to the user
+
+# [[$listener]] will send us, via [[$send_thread]], the [[Stop_Outthread]]
+# exception when the other side goes away.
+$send_thread = Thread.current
+
+# [[Webtube#run]] will hog the whole thread it runs on, so we'll give it a
+# thread of its own.
+$recv_thread = Thread.new do
+  $webtube.run $listener
+end
+
+begin
+  until $stdin.eof? do
+    line = $stdin.readline.chomp!
+    case line
+    when /\A\/(\/)/ then
+      $webtube.send_message $1 + $'
+    when /\A\/([0-9a-f])\b\s*/i then
+      $webtube.send_message $', $1.hex
+    when /\A\/ping\b\s*/ then
+      $webtube.send_message $', Webtube::OPCODE_PING
+      puts "(Ping sent.)"
+    when /\A\/close\b\s*\Z/ then
+      $webtube.close
+      puts "(Close sent.)"
+    when /\A\/close\b\s+(\d+)\s*/ then
+      $webtube.close $1.to_i, $'
+      puts "(Close sent.)"
+    else
+      $webtube.send_message line
+    end
+  end
+  $webtube.close
+  $recv_thread.join
+rescue Stop_Outthread
+end

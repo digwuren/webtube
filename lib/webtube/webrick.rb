@@ -74,7 +74,9 @@ class WEBrick::HTTPServer
         # Replace [[response.send_body]] with the WS engine.  WEBrick will call
         # it automatically after sending the response header.
         define_method :send_body do |socket|
-          Webtube.new socket, true, header: request, listener: listener
+          webtube = Webtube.new(socket, true, close_socket: false)
+          webtube.header = request
+          webtube.run listener
           return
         end
       end

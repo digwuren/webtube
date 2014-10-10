@@ -7,6 +7,7 @@ Gem::Specification.new do |s|
   s.author = 'Andres Soolo'
   s.email = 'dig@mirky.net'
   s.files = File.read('Manifest.txt').split(/\n/)
+  s.executables << 'wsc'
   s.license = 'GPL-3'
   s.description = <<EOD
 Webtube is an implementation of the [[WebSocket]] protocol for [[Ruby]].  Some

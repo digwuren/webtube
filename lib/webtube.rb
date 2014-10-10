@@ -1,7 +1,11 @@
 # webtube.rb -- an implementation of the WebSocket extension of HTTP
 
+require 'base64'
+require 'digest/sha1'
+require 'net/http'
 require 'securerandom'
 require 'thread'
+require 'uri'
 require 'webrick/httprequest'
 
 class Webtube
@@ -15,10 +19,45 @@ class Webtube
 
   attr_accessor :allow_rsv_bits
   attr_accessor :allow_opcodes
-  attr_accessor :header
+
+  # The following two slots are not used by the [[Webtube]] infrastructrue.
+  # They have been defined purely so that application code could easily
+  # associate data it finds significant to [[Webtube]] instances.
+
+  attr_accessor :header # [[accept_webtube]] saves the request object here
   attr_accessor :context
 
-  # The listener can implement the following methods:
+  def initialize socket,
+      serverp,
+          # If true, we will expect incoming data masked and will not mask
+          # outgoing data.  If false, we will expect incoming data unmasked and
+          # will mask outgoing data.
+      allow_rsv_bits: 0,
+      allow_opcodes: [Webtube::OPCODE_TEXT, Webtube::OPCODE_BINARY],
+      close_socket: true
+    super()
+    @socket = socket
+    @serverp = serverp
+    @allow_rsv_bits = allow_rsv_bits
+    @allow_opcodes = allow_opcodes
+    @close_socket = close_socket
+    @defrag_buffer = []
+    @alive = true
+    @send_mutex = Mutex.new
+        # Guards message sending, so that fragmented messages won't get
+        # interleaved, and the [[@alive]] flag.
+    @run_mutex = Mutex.new
+        # Guards the main read loop.
+    @receiving_frame = false
+        # Are we currently receiving a frame for the [[Webtube#run]] main loop?
+    @reception_interrupt_mutex = Mutex.new
+        # guards [[@receiving_frame]]
+    return
+  end
+
+  # Run a loop to read all the messages and control frames coming in via this
+  # WebSocket, and hand events to the given [[listener]].  The listener can
+  # implement the following methods:
   #
   # - onopen(webtube) will be called as soon as the channel is set up.
   #
@@ -34,11 +73,7 @@ class Webtube
   #   Normally, once the handler returns, [[Webtube]] will respond with a close
   #   frame of the same status code and close the connection, but the handler
   #   may call [[Webtube#close]] to request a closure with a different status
-  #   code or without one.  Note that [[Webtube#close]] is implemented by
-  #   raising the [[Webtube::Close]] exception in the thread serving the
-  #   [[Webtube]], so if it is called from the same thread, it will never
-  #   return.  Also note that [[Webtube]] calls its listener events without
-  #   changing threads, so this is the default situation.
+  #   code or without one.
   #
   # - onping(webtube, frame) will be called upon receipt of an [[OPCODE_PING]]
   #   frame.  [[Webtube]] will take care of ponging all the pings, but the
@@ -69,128 +104,116 @@ class Webtube
   # sending any code by having [[websocket_close_status_code]] return [[nil]]
   # instead of an integer.
   #
-  def initialize socket,
-      serverp,
-          # If true, we will expect incoming data masked and will not mask
-          # outgoing data.  If false, we will expect incoming data unmasked and
-          # will mask outgoing data.
-      allow_rsv_bits: 0,
-      allow_opcodes: [Webtube::OPCODE_TEXT, Webtube::OPCODE_BINARY],
-      listener: nil,
-      header: nil,
-          # not used by the Webtube infrastructure but may be of interest to
-          # application code
-      context: nil # ditto
-    super()
-    @socket = socket
-    @serverp = serverp
-    @allow_rsv_bits = allow_rsv_bits
-    @allow_opcodes = allow_opcodes
-    @listener = listener
-    @header = header
-    @context = context
-    @defrag_buffer = []
-    @mutex = Mutex.new
-    @thread = Thread.current
-
-    begin
-      @listener.onopen self if @listener.respond_to? :onopen
-      loop do
-        frame = Webtube::Frame.read_from_socket @socket
-        unless (frame.rsv & ~@allow_rsv_bits) == 0 then
-          raise Webtube::UnknownReservedBit.new(frame: frame)
-        end
-        if @serverp then
-          unless frame.masked?
-            raise Webtube::UnmaskedFrameToServer.new(frame: frame)
-          end
-        else
-          unless !frame.masked? then
-            raise Webtube::MaskedFrameToClient.new(frame: frame)
-          end
-        end
-        if !frame.control_frame? then
-          # data frame
-          if frame.opcode != Webtube::OPCODE_CONTINUATION then
-            # initial frame
-            unless @allow_opcodes.include? frame.opcode then
-              raise Webtube::UnknownOpcode.new(frame: frame)
+  def run listener
+    @run_mutex.synchronize do
+      @thread = Thread.current
+      begin
+        listener.onopen self if listener.respond_to? :onopen
+        while @send_mutex.synchronize{@alive} do
+          begin
+            @reception_interrupt_mutex.synchronize do
+              @receiving_frame = true
             end
-            unless @defrag_buffer.empty? then
-              raise Webtube::MissingContinuationFrame.new
+            frame = Webtube::Frame.read_from_socket @socket
+          ensure
+            @reception_interrupt_mutex.synchronize do
+              @receiving_frame = false
+            end
+          end
+          unless (frame.rsv & ~@allow_rsv_bits) == 0 then
+            raise Webtube::UnknownReservedBit.new(frame: frame)
+          end
+          if @serverp then
+            unless frame.masked?
+              raise Webtube::UnmaskedFrameToServer.new(frame: frame)
             end
           else
-            # continuation frame
-            if @defrag_buffer.empty? then
-              raise Webtube::UnexpectedContinuationFrame.new(frame: frame)
+            unless !frame.masked? then
+              raise Webtube::MaskedFrameToClient.new(frame: frame)
             end
           end
-          @defrag_buffer.push frame
-          if frame.fin? then
-            opcode = @defrag_buffer.first.opcode
-            data = @defrag_buffer.map(&:payload).join ''
-            @defrag_buffer = []
-            if opcode == Webtube::OPCODE_TEXT then
-              # text messages must be encoded in UTF-8, as per RFC 6455
-              data.force_encoding 'UTF-8'
-              unless data.valid_encoding? then
-                data.force_encoding 'ASCII-8BIT'
-                raise Webtube::BadlyEncodedText.new(data: data)
+          if !frame.control_frame? then
+            # data frame
+            if frame.opcode != Webtube::OPCODE_CONTINUATION then
+              # initial frame
+              unless @allow_opcodes.include? frame.opcode then
+                raise Webtube::UnknownOpcode.new(frame: frame)
               end
-            end
-            @listener.onmessage self, data, opcode \
-                if @listener.respond_to? :onmessage
-          end
-        elsif (0x08 .. 0x0F).include? frame.opcode then
-          # control frame
-          unless frame.fin? then
-            raise Webtube::FragmentedControlFrame.new(frame: frame)
-          end
-          case frame.opcode
-          when Webtube::OPCODE_CLOSE then
-            message = frame.payload
-            if message.length >= 2 then
-              status_code, = message.unpack 'n'
-              unless status_code == 1000 then
-                @listener.onannoyedclose self, frame \
-                    if @listener.respond_to? :onannoyedclose
+              unless @defrag_buffer.empty? then
+                raise Webtube::MissingContinuationFrame.new
               end
             else
-              status_code = 1000
+              # continuation frame
+              if @defrag_buffer.empty? then
+                raise Webtube::UnexpectedContinuationFrame.new(frame: frame)
+              end
             end
-            raise Close.new(status_code)
-          when Webtube::OPCODE_PING then
-            @listener.onping self, frame if @listener.respond_to? :onping
-            send_message frame.payload, Webtube::OPCODE_PONG
-          when Webtube::OPCODE_PONG then
-            @listener.onpong self, frame if @listener.respond_to? :onpong
-            # ignore
+            @defrag_buffer.push frame
+            if frame.fin? then
+              opcode = @defrag_buffer.first.opcode
+              data = @defrag_buffer.map(&:payload).join ''
+              @defrag_buffer = []
+              if opcode == Webtube::OPCODE_TEXT then
+                # text messages must be encoded in UTF-8, as per RFC 6455
+                data.force_encoding 'UTF-8'
+                unless data.valid_encoding? then
+                  data.force_encoding 'ASCII-8BIT'
+                  raise Webtube::BadlyEncodedText.new(data: data)
+                end
+              end
+              listener.onmessage self, data, opcode \
+                  if listener.respond_to? :onmessage
+            end
+          elsif (0x08 .. 0x0F).include? frame.opcode then
+            # control frame
+            unless frame.fin? then
+              raise Webtube::FragmentedControlFrame.new(frame: frame)
+            end
+            case frame.opcode
+            when Webtube::OPCODE_CLOSE then
+              message = frame.payload
+              if message.length >= 2 then
+                status_code, = message.unpack 'n'
+                unless status_code == 1000 then
+                  listener.onannoyedclose self, frame \
+                      if listener.respond_to? :onannoyedclose
+                end
+              else
+                status_code = 1000
+              end
+              close status_code
+            when Webtube::OPCODE_PING then
+              listener.onping self, frame if listener.respond_to? :onping
+              send_message frame.payload, Webtube::OPCODE_PONG
+            when Webtube::OPCODE_PONG then
+              listener.onpong self, frame if listener.respond_to? :onpong
+              # ignore
+            else
+              raise Webtube::UnknownOpcode.new(frame: frame)
+            end
           else
-            raise Webtube::UnknownOpcode.new(frame: frame)
+            raise 'assertion failed'
           end
-        else
-          raise 'assertion failed'
         end
+      rescue AbortReceiveLoop
+        # we're out of the loop now, so nothing further to do
+      rescue Exception => e
+        status_code = if e.respond_to? :websocket_close_status_code then
+          e.websocket_close_status_code
+        else
+          1011 # 'unexpected condition'
+        end
+        listener.onexception self, e if listener.respond_to? :onexception
+        begin
+          close status_code
+        rescue Errno::EPIPE, Errno::ECONNRESET, Errno::ENOTCONN
+          # ignore, we have a bigger exception to handle
+        end
+        raise e
+      ensure
+        @thread = nil
+        listener.onclose self if listener.respond_to? :onclose
       end
-    rescue Close => e
-      send_message e.to_payload, Webtube::OPCODE_CLOSE
-    rescue Exception => e
-      status_code = if e.respond_to? :websocket_close_status_code then
-        e.websocket_close_status_code
-      else
-        1011 # 'unexpected condition'
-      end
-      @listener.onexception self, e if @listener.respond_to? :onexception
-      begin
-        close = Close.new(status_code)
-        send_message close.to_payload, Webtube::OPCODE_CLOSE
-      rescue Errno::EPIPE, Errno::ECONNRESET, Errno::ENOTCONN
-        # ignore, we have a bigger exception to handle
-      end
-      raise e
-    ensure
-      @thread = nil
-      @listener.onclose self if @listener.respond_to? :onclose
     end
     return
   end
@@ -203,7 +226,8 @@ class Webtube
     if opcode == Webtube::OPCODE_TEXT and message.encoding.name != 'UTF-8' then
       message = message.encode 'UTF-8'
     end
-    @mutex.synchronize do
+    @send_mutex.synchronize do
+      raise 'WebSocket connection no longer live' unless @alive
       # In order to ensure that the local kernel will treat our (data) frames
       # atomically during the [[write]] syscall, we'll want to ensure that the
       # frame size does not exceed 512 bytes -- the minimum permitted size for
@@ -220,11 +244,7 @@ class Webtube
     return
   end
 
-  # Close the connection, thus preventing further processing.  Note that this
-  # is implemented by raising the [[Close]] exception in the context of the
-  # [[Webtube]]'s thread; if the caller lives in the same thread, this method
-  # will never return, as the thread will instead handle the closure and return
-  # from [[Webtube::new]].
+  # Close the connection, thus preventing further processing.
   #
   # If [[status_code]] is supplied, it will be passed to the other side in the
   # [[OPCODE_CLOSE]] frame.  The default is 1000 which indicates normal
@@ -234,10 +254,120 @@ class Webtube
   # suppress delivery of [[close_explanation]], even if non-empty.
   #
   # Note that RFC 6455 requires the explanation to be encoded in UTF-8.
-  # Accordingly, [[Close#to_payload]] may need to re-encode it.
+  # Accordingly, this method will re-encode it unless it is already in UTF-8.
   def close status_code = 1000, close_explanation = ""
-    @thread.raise Close.new(status_code, close_explanation)
+    # prepare the payload for the close frame
+    payload = ""
+    if status_code then
+      payload = [status_code].pack('n')
+      if close_explanation then
+        payload << close_explanation.encode('UTF-8')
+      end
+    end
+    # let the other side know we're closing
+    send_message payload, OPCODE_CLOSE
+    # break the main reception loop
+    @send_mutex.synchronize do
+      @alive = false
+    end
+    # if waiting for a frame (or parsing one), interrupt it
+    @reception_interrupt_mutex.synchronize do
+      @thread.raise AbortReceiveLoop.new if @receiving_frame
+    end
+    @socket.close if @close_socket
     return
+  end
+
+  # Attempt to set up a [[WebSocket]] connection to the given [[url]].  Return
+  # the [[Webtube]] instance if successful or raise an appropriate
+  # [[Webtube::WebSocketUpgradeFailed]].
+  def self::connect url,
+      header_fields: {},
+      ssl_verify_mode: nil,
+      on_http_response: nil,
+      allow_rsv_bits: 0,
+      allow_opcodes: [Webtube::OPCODE_TEXT, Webtube::OPCODE_BINARY],
+      close_socket: true
+    # We'll replace the WebSocket protocol prefix with an HTTP-based one so
+    # [[URI::parse]] would know how to parse the rest of the URL.
+    case url
+      when /\Aws:/ then
+        hturl = 'http:' + $'
+        ssl = false
+        default_port = 80
+      when /\Awss:/ then
+        hturl = 'https:' + $'
+        ssl = true
+        default_port = 443
+      else
+        raise "unknown URI scheme; use ws: or wss: instead"
+    end
+    hturi = URI.parse hturl
+
+    reqhdr = {}
+
+    # Copy over the user-supplied header fields.  Since Ruby hashes are
+    # case-sensitive but HTTP header field names are case-insensitive, we may
+    # have to combine fields whose names only differ in case.
+    header_fields.each_pair do |name, value|
+      name = name.downcase
+      if reqhdr.has_key? name then
+        reqhdr[name] += ', ' + value
+      else
+        reqhdr[name] = value
+      end
+    end
+
+    # Set up the WebSocket header fields (but we'll give user-specified values,
+    # if any, precedence)
+    reqhdr['host'] ||=
+        hturi.host + (hturi.port != default_port ? ":#{hturi.port}" : "")
+    reqhdr['upgrade'] ||= 'websocket'
+    reqhdr['connection'] ||= 'upgrade'
+    reqhdr['sec-websocket-key'] ||= SecureRandom.base64(16)
+    reqhdr['sec-websocket-version'] ||= '13'
+
+    start_options = {}
+    start_options[:use_ssl] = ssl
+    start_options[:verify_mode] = ssl_verify_mode if ssl and ssl_verify_mode
+    http = Net::HTTP.start hturi.host, hturi.port, **start_options
+
+    response = http.get hturi.path + (hturi.query ? '?' + hturi.query : ""),
+        reqhdr
+    on_http_response.call response if on_http_response
+
+    # Check that the server is seeing us now
+    unless response.code == '101' then
+      raise Webtube::WebSocketDeclined.new("the HTTP response code was not 101")
+    end
+    unless (response['Connection'] || '').downcase == 'upgrade' then
+      raise Webtube::WebSocketDeclined.new("the HTTP response did not say " +
+          "'Connection: upgrade'")
+    end
+    unless (response['Upgrade'] || '').downcase == 'websocket' then
+      raise Webtube::WebSocketDeclined.new("the HTTP response did not say " +
+          "'Upgrade: websocket'")
+    end
+    expected_accept = Digest::SHA1.base64digest(
+        reqhdr['sec-websocket-key'] +
+        '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+    unless (response['Sec-WebSocket-Accept'] || '') == expected_accept then
+      raise Webtube::WebSocketDeclined.new("the HTTP response did not say " +
+          "'Sec-WebSocket-Accept: #{expected_accept}'")
+    end
+    unless (response['Sec-WebSocket-Version'] || '13').
+        split(/\s*,\s*/).include? '13' then
+      raise Webtube::WebSocketVersionMismatch.new(
+          "Sec-WebSocket-Version negotiation failed")
+    end
+
+    # The connection has been set up.  Now let's set up the Webtube.
+    socket = http.instance_eval{@socket}
+    socket.read_timeout = nil # turn off timeout
+    return Webtube.new socket, false,
+        allow_rsv_bits: allow_rsv_bits,
+        allow_opcodes: allow_opcodes,
+        close_socket: close_socket
   end
 
   # The application may want to store many Webtube instances in a hash or a
@@ -249,29 +379,9 @@ class Webtube
     return object_id
   end
 
-  # A technical exception, raised by [[Webtube#close]] in order to indicate a
-  # close request.  Also takes care of encoding the status code and close
-  # message, if given.
-  class Close < Exception
-    attr_reader :status_code
-
-    def initialize status_code = nil, close_explanation = nil
-      super "#<Webtube::Close @status_code=#{status_code.inspect} " +
-          "@close_explanation=#{close_explanation.inspect}>"
-      @status_code = status_code
-      @close_explanation = close_explanation
-      return
-    end
-
-    def to_payload
-      if status_code then
-        payload = [status_code].pack('n')
-        payload << close_explanation.encode('UTF-8') if close_explanation
-        return payload
-      else
-        return ""
-      end
-    end
+  # A technical exception, raised by [[Webtube#close]] if [[Webtube#run]] is
+  # currently waiting for a frame.
+  class AbortReceiveLoop < Exception
   end
 
   # Note that [[body]] holds the /raw/ data; that is, if [[masked?]] is true,
@@ -493,6 +603,14 @@ class Webtube
     end
   end
 
+  class ConnectionNotAlive < RuntimeError
+    def initialize
+      super "WebSocket connection is no longer alive and can not transmit " +
+          "any more messages"
+      return
+    end
+  end
+
   class ProtocolError < StandardError
     def websocket_close_status_code
       return 1002
@@ -610,5 +728,14 @@ class Webtube
       @frame = frame
       return
     end
+  end
+
+  class WebSocketUpgradeFailed < StandardError
+  end
+
+  class WebSocketDeclined < WebSocketUpgradeFailed
+  end
+
+  class WebSocketVersionMismatch < WebSocketUpgradeFailed
   end
 end
