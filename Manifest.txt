@@ -1,5 +1,6 @@
 GPL-3
 Manifest.txt
+README
 bin/wsc
 lib/webtube.rb
 lib/webtube/vital-statistics.rb
