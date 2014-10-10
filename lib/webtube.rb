@@ -255,13 +255,13 @@ class Webtube
   #
   # Note that RFC 6455 requires the explanation to be encoded in UTF-8.
   # Accordingly, this method will re-encode it unless it is already in UTF-8.
-  def close status_code = 1000, close_explanation = ""
+  def close status_code = 1000, explanation = ""
     # prepare the payload for the close frame
     payload = ""
     if status_code then
       payload = [status_code].pack('n')
-      if close_explanation then
-        payload << close_explanation.encode('UTF-8')
+      if explanation then
+        payload << explanation.encode('UTF-8')
       end
     end
     # let the other side know we're closing
