@@ -35,9 +35,7 @@ servers and included with the Webtube distribution.)
   # the Webtube library pongs the pings), and [[/echo]], which echos.
 
   require 'webrick'
-  require 'webrick/httpservlet'
   require 'webtube/webrick'
-  require 'set'
 
   class << diagnostic_listener = Object.new
     def respond_to? name
