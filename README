@@ -14,7 +14,7 @@ servers and included with the Webtube distribution.)
   class << $listener = Object.new
     def onmessage webtube, message, opcode
       puts "The echo server says: #{message.inspect}"
-      # We only care about only message.
+      # We only care about one message.
       $webtube.close
       return
     end
