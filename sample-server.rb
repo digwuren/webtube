@@ -2,8 +2,8 @@
 
 # A sample WEBrick server using the Webtube API.  It listens on port 8888 and
 # provides two services: [[/diag]], which logs all the events from
-# [[Webtube#run]] and remains silent towards the client (although note that the
-# Webtube library pongs the pings), and [[/echo]], which echos.
+# [[Webtube#run]] and remains silent towards the client (although note that
+# the Webtube library pongs the pings), and [[/echo]], which echos.
 
 require 'webrick'
 require 'webrick/httpservlet'
