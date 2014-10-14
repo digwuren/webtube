@@ -87,7 +87,8 @@ module WEBrick
     #
     # See [[Webtube::new]] for a list of the supported methods for the
     # [[listener]].
-    def accept_webtube request, response, listener
+    def accept_webtube request, response, listener,
+        session: nil, context: nil
       # Check that the client speaks our version
       unless (request['Sec-WebSocket-Version'] || '').split(/\s*,\s*/).
           include? '13' then
@@ -130,6 +131,8 @@ module WEBrick
             begin
               vital_statistics.birth webtube
               webtube.header = request
+              webtube.session = session
+              webtube.context = context
               # Reassign us from the WEBrick's thread group to the one
               # maintained by [[Webtube::Vital_Statistics]].
               vital_statistics.thread_group.add Thread.current
