@@ -20,11 +20,12 @@ class Webtube
   attr_accessor :allow_rsv_bits
   attr_accessor :allow_opcodes
 
-  # The following two slots are not used by the [[Webtube]] infrastructrue.
+  # The following three slots are not used by the [[Webtube]] infrastructrue.
   # They have been defined purely so that application code could easily
   # associate data it finds significant to [[Webtube]] instances.
 
   attr_accessor :header # [[accept_webtube]] saves the request object here
+  attr_accessor :session
   attr_accessor :context
 
   def initialize socket,
