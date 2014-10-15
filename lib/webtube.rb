@@ -558,9 +558,9 @@ class Webtube
       header << if payload.bytesize <= 125 then
         [mask_flag | payload.bytesize].pack 'C'
       elsif payload.bytesize <= 0xFFFF then
-        [mask_flag | 126, payload.bytesize].pack 'n'
+        [mask_flag | 126, payload.bytesize].pack 'C n'
       elsif payload.bytesize <= 0x7FFF_FFFF_FFFF_FFFF then
-        [mask_flag | 127, payload.bytesize].pack 'Q>'
+        [mask_flag | 127, payload.bytesize].pack 'C Q>'
       else
         raise 'attempted to prepare a WebSocket frame with too big payload'
       end
