@@ -85,7 +85,7 @@ module WEBrick
     # thread.  (For synchronous messages, it can safely be called from the
     # handlers inside [[listener]].)
     #
-    # See [[Webtube::new]] for a list of the supported methods for the
+    # See [[Webtube#run]] for a list of the supported methods for the
     # [[listener]].
     def accept_webtube request, response, listener,
         session: nil, context: nil
