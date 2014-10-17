@@ -120,3 +120,658 @@ some special commands using the slash prefix:
 If you need to start a text message with a slash, you can double it for escape,
 or you can use the explicit [[/1]] command.  EOF from stdin is equivalent to
 [[/close 1000]].
+
+
+== API overview
+
+=== The [[Webtube]] class
+
+(Direct) instances of the [[Webtube]] class are hashed and [[eql?]]-compared by
+identity, thus behaving in an intuitive manner when used as keys of a [[Hash]]
+or elements of a [[Set]].
+
+In addition to the methods described below, each [[Webtube]] instance will have
+the readable and writable attributes [[header]], [[session]], and [[context]].
+[[Webtube]] does not care about them; they are intended to facilitate user code
+associating contextual or environmental data with the [[Webtube]].
+
+The [[Webtube]]-[[WEBrick]] integration (in particular,
+[[WEBrick::HTTPServer#accept_webtube]]) sets the [[header]] attribtue of newly
+created [[Webtube]] instances to the [[WEBrick::HTTPRequest]] used to establish
+the WebSocket connection; this may facilitate extracting HTTP header fields,
+URL query parameters or cookies from the request at a later time.  (Note that
+because the upgrade request is necessary delivered using the HTTP [[GET]]
+method, the HTTP file upload protocol, which requires [[POST]] is not available
+for WebSocket connections.  Also note that the WebDAV extensions are mutually
+incompatible with the WebSocket protocol, within the bounds of a single HTTP
+request, for the same reason.)
+
+
+==== [[Webtube::connect]]: connect to a remote server
+
+A WebSocket connection to a remote server can be set up by calling
+[[Webtube::connect]].  The calling interface goes like this:
+
+  Webtube::connect(url,
+      header_fields: {},
+      ssl_verify_mode: nil,
+      on_http_response: nil,
+      allow_rsv_bits: 0,
+      allow_opcodes: [Webtube::OPCODE_TEXT, Webtube::OPCODE_BINARY],
+      close_socket: true)
+
+- [[url]] is a [[String]] representing the target of the connection in the URL
+  form, using either the [[ws:]] or [[wss:]] protocol prefix.  A convenient
+  public server for basic testing is available on [[ws://echo.websocket.org/]].
+
+- [[header_fields]] is a [[Hash]] for specifying HTTP header fields for the
+  request.  [[Webtube]] will consider entries specified here to have a priority
+  over automatically created header fields even for the fields defined by the
+  WebSocket standard such as [[Upgrade]] and [[Sec-WebSocket-Key]]; this should
+  be used cautiously.
+
+- [[ssl_verify_mode]], if not [[nil]] and if the connection is encrypted, will
+  override OpenSSL's default mode of verifying the certificate at the beginning
+  of the SSL or TLS session.  Supported values are
+  [[OpenSSL::SSL::VERIFY_PEER]] (the default, and the recommended value) and
+  [[OpenSSL::SSL::VERIFY_NONE]] (to be used with great caution).  If the [[url]]
+  parameter has an [[ws:]] prefix, so the connection is not to be encrypted,
+  [[ssl_verify_mode]] has no effect.
+
+- [[on_http_response]], if supplied, will be called with the
+  [[Net::HTTPResponse]] instance representing the server's HTTP-level response
+  to the request to initiate a WebSocket connection.  This allows the client
+  code, for an example, to display the response header fields to the user.
+
+The following fields will be passed on to [[Webtube::new]] intact:
+
+- [[allow_rsv_bits]] is an [[Integer]], a bitmap of the reserved bits (4 for
+  RSV1, 2 for RSV2, 1 for RSV3) that, when appearing on inbound frames, should
+  be considered 'known'.  The WebSocket protocol specification mandates failing
+  the connection if a frame with unknown reserved bits should arrive, and
+  [[Webtube]] complies.  Note that the current version of [[Webtube]] does not
+  offer a convenient way for the client code to access the reserved bits of data
+  messages, only of control frames.
+
+- [[allow_opcodes]] specifies the opcodes of messages and control frames that
+  should be considered 'known'.  The WebSocket protocol specification mandates
+  failing the connection if a frame with an unknown opcode should arrive, and
+  [[Webtube]] complies.  The [[Webtube]] instance will store this object and use
+  its [[include?]] method for the test, thus allowing either [[Array]], [[Set]]
+  or [[Range]] instances to work.  The opcodes subject to this kind of filtering
+  are the data message opcodes 1-7 and the control frame opcodes 8-15; note,
+  however, that the control frame opcodes 8 ([[OPCODE_CLOSE]]), 9
+  ([[OPCODE_PING]]), and 10 ([[OPCODE_PONG]]) are essential infrastructural
+  opcodes defined by the standard, so [[Webtube]] will always consider them
+  'known'.  However, control frames of these opcodes will be passed to the
+  [[oncontrolframe]] event handler (if any) only if [[allow_opcodes]] approves
+  such opcodes.
+
+- [[close_socket]] specifies whether the [[Webtube]] instance should close the
+  [[Socket]] when the connection is terminated.  The default is [[true]]; it
+  may need to be set to [[false]] in order to suppress [[Webtube]]'s closure of
+  its socket in contexts sockets are managed by other means, such as the WEBrick
+  server.
+
+Upon success, [[Webtube::connect]] will return the [[Webtube]] instance
+representing the client endpoint.  Upon WebSocket-level failure with lower
+layers intact, a [[Webtube::WebSocketUpgradeFailed]] exception will be thrown
+instead.  This exception derives from [[StandardError]] as most run-time
+errors.  In the the current version of [[Webtube]], the specific known
+subclasses are:
+
+- [[Webtube::WebSocketDeclined]] for when the server is not responding to the
+  WebSocket connection initiation request affirmatively (which can, by design
+  of the protocol, mean that the server wants to speak plain old HTTP);
+
+- [[Webtube::WebSocketVersionMismatch]] for when the server requests usage of a
+  WebSocket protocol version that [[Webtube]] does not know.  At the time of
+  [[Webtube]]'s creation, only one WebSocket protocol version -- namely, 13 --
+  has been defined (by RFC 6455]), but this may change in the future, and it is
+  possible that a hypothetical future server will not be backwards compatible to
+  the original WebSocket protocol.
+
+Other exceptions representing TCP-level, HTTP-level, or infrastructure failures
+can also occur.
+
+
+==== [[Webtube::new]]: wrap a [[Socket]] into a [[Webtube]]
+
+An instance of [[Webtube]] represents an endpoint of a WebSocket connection.
+Because the protocol's core is symmetric, both ends can be represented by
+instances of the same class.  Note that the constructor assumes the opening
+handshake and initial negotiation is complete.  Code needing to connect to a
+remote WebSocket server should usually call [[Webtube::connect]] instead of
+invoking the constructor directly.  Code needing to accept incoming WebSocket
+connections should usually call the server-specific glue code such as
+[[WEBrick::HTTPServer#accept_webtube]] (available after [[require
+'webtube/webrick']]).
+
+The constructor's calling interface goes like this:
+
+  Webtube::new(socket, serverp,
+      allow_rsv_bits: 0,
+      allow_opcodes: [Webtube::OPCODE_TEXT],
+      close_socket: true)
+
+- [[socket]] is the underlying [[Socket]] instance for sending and receiving
+  data.
+
+- [[serverp]] is a Boolean indicating whether this socket represents the server
+  (as contrary to the client) side of the connection.  While the WebSocket
+  protocol is largely symmetric, it requires a special masking procedure on
+  frames transmitted by the client to the server, and prohibits it on frames
+  transmitted by the server to the client.  Along with masking itself, this is
+  reflected in a header flag of each frame.
+
+- [[allow_rsv_bits]] is an [[Integer]], a bitmap of the reserved bits (4 for
+  RSV1, 2 for RSV2, 1 for RSV3) that, when appearing on inbound frames, should
+  be considered 'known'.  The WebSocket protocol specification mandates failing
+  the connection if a frame with unknown reserved bits should arrive, and
+  [[Webtube]] complies.  Note that the current version of [[Webtube]] does not
+  offer a convenient way for the client code to access the reserved bits of data
+  messages, only of control frames.
+
+- [[allow_opcodes]] specifies the opcodes of messages and control frames that
+  should be considered 'known'.  The WebSocket protocol specification mandates
+  failing the connection if a frame with an unknown opcode should arrive, and
+  [[Webtube]] complies.  The [[Webtube]] instance will store this object and use
+  its [[include?]] method for the test, thus allowing either [[Array]], [[Set]]
+  or [[Range]] instances to work.  The opcodes subject to this kind of filtering
+  are the data message opcodes 1-7 and the control frame opcodes 8-15; note,
+  however, that the control frame opcodes 8 ([[OPCODE_CLOSE]]), 9
+  ([[OPCODE_PING]]), and 10 ([[OPCODE_PONG]]) are essential infrastructural
+  opcodes defined by the standard, so [[Webtube]] will always consider them
+  'known'.  However, control frames of these opcodes will be passed to the
+  [[oncontrolframe]] event handler (if any) only if [[allow_opcodes]] approves
+  such opcodes.
+
+- [[close_socket]] specifies whether the [[Webtube]] instance should close the
+  [[Socket]] when the connection is terminated.  The default is [[true]]; it
+  may need to be set to [[false]] in order to suppress [[Webtube]]'s closure of
+  its socket in contexts sockets are managed by other means, such as the WEBrick
+  server.
+
+
+==== [[Webtube#run]]: the loop for incoming events
+
+  run(listener)
+
+This method runs a loop to read all the messages and control frames coming in
+via this WebSocket, and hands events to the given [[listener]].  The listener
+can implement the following methods:
+
+- [[onopen(webtube)]] will be called as soon as the channel is set up.
+
+- [[onmessage(webtube, message_body, opcode)]] will be called with each
+  arriving data message once it has been defragmented.  The data will be passed
+  to it as a [[String]], encoded in [[UTF-8]] for [[OPCODE_TEXT]] messages and
+  in [[ASCII-8BIT]] for all the other message opcodes.
+
+- oncontrolframe(webtube, frame) will be called upon receipt of a control frame
+  whose opcode is listed in the [[allow_opcodes]] parameter of this [[Webtube]]
+  instance.  The frame is repreented by an instance of [[Webtube::Frame]].  Note
+  that [[Webtube]] handles connection closures ([[OPCODE_CLOSE]]) and ponging
+  all the pings ([[OPCODE_PING]]) automatically.
+
+- [[onping(webtube, frame)]] will be called upon receipt of an [[OPCODE_PING]]
+  frame.  [[Webtube]] will take care of ponging all the pings, but the
+  listener may want to process such an event for statistical information.
+
+- [[onpong(webtube, frame)]] will be called upon receipt of an [[OPCODE_PONG]]
+  frame.
+
+- [[onclose(webtube)]] will be called upon closure of the connection, for any
+  reason.
+
+- [[onannoyedclose(webtube, frame)]] will be called upon receipt of an
+  [[OPCODE_CLOSE]] frame with an explicit status code other than 1000.
+  This typically indicates that the other side is annoyed, so the listener
+  may want to log the condition for debugging or further analysis.
+  Normally, once the handler returns, [[Webtube]] will respond with a close
+  frame of the same status code and close the connection, but the handler
+  may call [[Webtube#close]] to request a closure with a different status
+  code or without one.
+
+- [[onexception(webtube, exception)]] will be called if an unhandled
+  [[Exception]] is raised during the [[Webtube]]'s lifecycle, including all of
+  the listener event handlers.  The handler may log the exception but should
+  return normally so that the [[Webtube]] can issue a proper close frame for
+  the other end and invoke the [[onclose]] handler, after which the exception
+  will be raised again so the caller of [[Webtube#run]] will have a chance of
+  handling the exception.
+
+Before calling any of the handlers, [[respond_to?]] will be used to check
+implementedness.
+
+If an exception occurs during processing, it may implement a specific
+status code to be passed to the other end via the [[OPCODE_CLOSE]] frame by
+implementing the [[websocket_close_status_code]] method returning the code
+as an integer.  The default code, used if the exception does not specify
+one, is 1011 'unexpected condition'.  An exception may explicitly suppress
+sending any code by having [[websocket_close_status_code]] return [[nil]]
+instead of an integer.
+
+Note that [[Webtube#run]] will not return until the connection will have been
+closed.  If the caller needs to get other work done in the connection's
+lifetime, it will need to either handle this work inside calls to the
+[[listener]] or set up separate [[Thread]]s for the [[Webtube#run]] and for the
+other work.
+
+[[Webtube#run]] will raise instances of [[Webtube::ProtocolError]] if events
+that the WebSocket protocol does not permit should happen.  In the current
+version of [[Webtube]], the specific known subclasses are:
+
+- [[Webtube::BrokenFrame]] indicates that a complete frame could not be read
+  from the underlying TCP connection.  The [[partial_frame]] attribute holds as
+  much data, as a [[String]] of [[ASCII-8BIT]] encoding, as was available.
+
+- [[Webtube::UnknownReservedBit]] indicates that a frame with an RSV bit not
+  specifically permitted by the [[allow_rsv_bits]] parameter was received.  The
+  [[frame]] attribute holds the frame as a [[Webtube::Frame]] instance.
+
+- [[Webtube::UnknownOpcode]] indicates that a frame with an opcode not
+  specifically permitted by the [[allow_opcodes]] parameter, or by the standard,
+  was received.  The [[frame]] attribute holds the frame as a [[Webtube::Frame]]
+  instance.  Note that if the opcode indicates a data message (as contrary to a
+  control frame), the [[frame]] will hold only its first fragment, as WebSocket
+  data messages are subject to fragmentation and the message's opcode is stored
+  in the first fragment.
+
+- [[Webtube::UnmaskedFrameToServer]] indicates that a [[Webtube]] running in
+  server mode received a frame without masking.  As per the WebSocket standard,
+  [[Webtube]] considers this a fatal protocol failure.  The [[frame]] attribute
+  holds the frame as a [[Webtube::Frame]] instance.
+
+- [[Webtube::MaskedFrameToClient]] indicates that a [[Webtube]] running in
+  client mode received a frame with masking.  As per the WebSocket standard,
+  [[Webtube]] considers this a fatal protocol failure.  The [[frame]] attribute
+  holds the frame as a [[Webtube::Frame]] instance.
+
+- [[Webtube::MissingContinuationFrame]] indicates receipt of a new data message
+  initial frame while the [[Webtube]] was expecting a continuation frame of a
+  fragmented data message.  Note that control frames are permitted to arrive
+  interleaved with fragments of a data message.
+
+- [[Webtube::UnexpectedContinuationFrame]] indicates receipt of a data message
+  continuation frame while the [[Webtube]] was not expecting one.  The [[frame]]
+  attribute holds the frame as a [[Webtube::Frame]] instance.
+
+- [[Webtube::BadlyEncodedText]] indicates receipt of a text message
+  ([[OPCODE_TEXT]]) whose content is not a valid UTF-8 string.  As per the
+  WebSocket standard, [[Webtube]] considers this a fatal protocol failure.  The
+  [[data]] attribute holds the payload as a [[String]] instance of the
+  [[ASCII-8BIT]] encoding.
+
+- [[Webtube::FragmenedControlFrame]] indicates receipt of a control frame whose
+[[FIN]] flag is not set.
+
+Other exceptions representing TCP-level, HTTP-level, or infrastructure failures
+can also occur.
+
+
+==== [[Webtube#send_message]]: transmit a message or control frame
+
+  send_message(payload, opcode = Webtube::OPCODE_TEXT)
+
+This method transmits the given [[payload]], a [[String]], over this WebSocket
+connection to its other end using the given [[opcode]].  If [[opcode]] is
+[[Webtube::OPCODE_TEXT]] and [[payload]] is not encoded in [[UTF-8]], it will
+recode the payload to [[UTF-8]] first, as required by the WebSocket standard.
+
+It is safe to call [[send_message]] from multiple threads concurrently; each
+[[Webtube]] uses an internal lock to make sure that two data messages, despite
+possible fragmentation, will not be interleaved.
+
+An exception will be raised if [[send_message]] is called after closure of the
+[[Webtube]].  The exception's class and ancestry is currently not defined,
+except that it will derive, directly or indirectly, from [[StandardError]].  It
+may derive from [[RuntimeError]] but this is not guaranteed.
+
+
+==== [[Webtube#close]]: close a WebSocket connection
+
+  close(status_code = 1000, explanation = "")
+
+This method transmits an [[OPCODE_CLOSE]] control frame of the specified
+[[status_code]] and [[explanation]], aborts a pending wait to receive frame (if
+any), and marks the [[Webtube]] dead, thus blocking further transmissions.  If
+the [[close_socket]] parameter of the [[Webtube]] is set, it will also close
+the underlying socket.
+
+The [[status_code]] can be explicitly set to [[nil]], thus causing the
+transmitted close frame to not contain a payload (that is, neither the status
+code nor the explanation).  The default is 1000, indicating normal closure.
+
+If [[explanation]] is not encoded in UTF-8, it will be recoded, as required by
+the WebSocket protocol specification.
+
+Attempting to close a [[Webtube]] that has already been closed will cause an
+exception as attempting to transmit via a closed [[Webtube]]; see
+[[Webtube#send_message]].
+
+
+=== The [[Webtube::Frame]] class
+
+Instances of this class represent individual WebSocket frames.  They are
+exposed to user code via the [[oncontrolframe]], [[onping]], and [[onpong]]
+events and some exceptions inheriting from [[ProtocolError]].
+
+There is currently no convenient interface for user code to build
+[[Webtube::Frame]] instances by hand, but manipulating some header fields may
+function as expected.  (Manipulating the payload will usually not, due to this
+interfering with the length- and masking-related header fields.)
+
+The following methods are user-serviceable:
+
+- [[Webtube::Frame#header]] returns the header as a [[String]] encoded in
+  [[ASCII-8BIT]].
+
+- [[Webtube::Frame#header=]] replaces the header.  There is no validation; use
+  with caution.
+
+- [[Webtube::Frame#body]] returns the body as a [[String]] encoded in
+  [[ASCII-8BIT]].
+
+- [[Webtube::Frame#body=]] replaces the body.  There is no validation or
+  masking; use with extreme caution.
+
+- [[Webtube::Frame#fin?]] extracts and returns (as [[Boolean]]) the [[FIN]]
+  flag of this frame.
+
+- [[Webtube::Frame#fin=]] replaces the [[FIN]] flag of this frame.
+
+- [[Webtube::Frame#rsv1]], [[Webtube::Frame#rsv2]], and [[Webtube::Frame#rsv3]]
+  extract the RSV1, RSV2, and RSV3 flags of this frame, as [[Boolean]]
+  instances, correspondingly.
+
+- [[Webtube::Frame#rsv]] extracts the RSV1, RSV2, and RSV3 bitfield as an
+  integer in the range of [[0 .. 7]].
+
+- [[Webtube::Frame#opcode]] extracts the opcode of this frame as an integer in
+  the range of [[0 .. 15]].
+
+- [[Webtube::Frame#opcode=]] replaces the opcode.
+
+- [[Webtube::Frame#control_frame?]] checks whether this frame is considered a
+  control frame, defined as having an opcode of 8 or greater.
+
+- [[Webtube::Frame#masked?]] extracts the [[MSK]] flag of this frame.
+
+- [[Webtube::Frame#payload_length]] extracts the payload length, in whichever
+  of the three ways defined by the protocol specification it is encoded, from
+  the frame's header.
+
+- [[Webtube::Frame#mask]] extracts the mask of this frame, as a 4-byte
+  [[String]] encoded in [[ASCII-8BIT]], if the [[MSK]] flag is not set.  If it
+  is not set, this method returns [[nil]].
+
+- [[Webtube::Frame#payload]] retrieves the payload of this frame, demasking the
+  frame's body if necessary.
+
+- [[Webtube::Frame::read_from_socket(socket)]] reads all the bytes of one
+  WebSocket frame from the given [[IO]] instance (which must provide data of
+  the plain [[ASCII-8BIT]] encoding, and emphatically not a multibyte encoding)
+  and returns a [[Webtube::Frame]] instance representing the frame, or raises
+  [[Webtube::BrokenFrame]] if the inbound traffic ends before the whole frame
+  will have been read.  Note that this will involve calling [[IO#read]] twice
+  or thrice, and is therefore unsafe to be called in multithreaded code unless
+  external locking or synchronisation measures are used.  (This method is
+  mainly intended for internal use by [[Webtube#run]], but it may be of use in
+  other contexts, such as parsing stored sequences of WebSocket frames.)
+
+
+=== WEBrick integration
+
+These classes and methods are defined in the separately loadable
+[['webtube/webrick']].  Note that this file will, in addition to defining new
+classes and methods, replace the [[initialize]] and [[shutdown]] methods of the
+[[WEBrick::HTTPServer]] class to make sure all the [[Webtube]] instances
+associated with this server will be properly shut down upon the server's
+shutdown.
+
+
+==== [[WEBrick::HTTPRequest#websocket_upgrade_request?]]
+
+This method checks whether this HTTP request is a valid request to establish a
+WebSocket connection.
+
+
+==== [[WEBrick::HTTPServer#webtubes]]
+
+Retrieve the [[Webtube::Vital_Statistics]] instance for this server.
+
+==== [[WEBrick::HTTPServer#accept_webtube]]
+
+  accept_webtube(request, response, listener,
+      session: nil,
+      context: nil)
+
+Given a [[request]] and a [[response]] object, as prepared by a
+[[WEBrick::HTTPServer]] for processing in a portlet, this method attempts to
+accept the client's request to establish a WebSocket connection.  The
+[[request]] must actually contain such a request; see
+[[websocket_upgrade_request?]].
+
+The attempt will fail in the theoretical case the client and the server can't
+agree on the protocol version to use.  In such a case, [[accept_webtube]] will
+prepare a 426 'Upgrade required' response, explaining in plain text what the
+problem is and advertising, using the [[Sec-WebSocket-Version]] header field,
+the protocol version (specifically, 13) it is prepared to speak.  When this
+happens, the WebSocket session will never be set up and no [[listener]] events
+will be called.
+
+Note that [[accept_webtube]] will manipulate [[response]] and return
+immediately.  The actual WebSocket session will begin once WEBrick attempts to
+deliver the [[response]], and this will be signalled by the newly constructed
+[[Webtube]] instance delivering an [[onopen]] event to [[listener]].
+
+Also note that the loop to process incoming WebSocket frames will hog the
+whole thread; in order to deliver asynchronous messages over the
+WebSocket, [[Webtube#send_message]] needs to be called from another
+thread.  (For synchronous messages, it can safely be called from the
+handlers inside [[listener]].)
+
+See [[Webtube#run]] for a list of the supported methods for the
+[[listener]].
+
+The [[session]] and [[context]] parameters, if given, will be stored in the
+[[Webtube]] instance as attributes.  The [[Webtube]] itself will not care about
+them, but this mechanism may be of use for the user code.  [[accept_webtube]]
+stores the [[request]] in the [[Webtube]] instance's [[header]] attribute; for
+this reason, it does not accept [[header]] as a parameter.
+
+==== [[WEBrick::HTTPServer#mount_webtube]]
+
+  mount_webtube(dir, listener)
+
+This method mounts at the specified virtual directory a WEBrick portlet
+implementing a WebSocket-only service, using the given [[listener]] as its
+backend.  (Note that there is only one listener for the whole service but each
+event passed to the listener will have a specific [[Webtube]] instance as its
+first parameter.)
+
+The portlet itself is implemented by the class
+[[WEBrick::HTTPServlet::WebtubeHandler]].  The implementation details are
+deliberately left undocumented in the current version of [[Webtube]], and they
+may change radically in the future.  For now, the class should be considered
+opaque.
+
+
+== Limitations and possible future work
+
+- The WebSocket specification permits interleaving control frames with
+  fragments of a data message.  The current [[Webtube]] implementation engages
+  an internal lock serialising all calls of [[send_message]].  A future version
+  may ignore this lock if [[send_message]] is called to transmit a control frame
+  that fits into the [[PIPE_BUF]] limit and is thus not subject to the risk of
+  the OS kernel's [[write()]] syscall handling it partially and causing a
+  WebSocket frame structure breakage.
+
+  - Such ignoring may, in a future version, be configurable on a per-opcode
+    basis.
+
+- The WebSocket specification provides for handling the content of fragmented
+  data messages even before the reception of the final frame.  The current
+  [[Webtube]] implementation sponges up all the fragments before triggering
+  [[onmessage]].
+
+  - Some approaches worth considering involve delivering fragments of data
+    messages to the listener as they arrive or extracting parts -- such as text
+    lines, sequences of complete UTF-8 code points, or fixed-length data blocks
+    -- from the fragment sponge as soon as they can be wholly extracted.
+
+- The WebSocket specification provides for extensions defining semantics for
+  the reserved bits of both data and control frames, and for extra header fields
+  between the WebSocket header and the ultimate payload.  [[Webtube]] only
+  provides for handling reserved bits of incoming control frames but not data
+  frames, and does not provide for a convenient way to transmit frames with
+  reserved bits or extra header fields set.
+
+  - In particular, work is currently underway to define a WebSocket protocol
+    extension for transparent compression of frames and/or messages.  At this
+    time, there are multiple competing proposals, and IETF has not released a
+    final specification, but a future version of [[Webtube]] may implement one
+    or more such extension.  The most promising one, at this time, seems
+    [[permessage-deflate]].
+
+- The WebSocket specification provides for explicit negotiation of a
+  subprotocol between the client and the server.  While [[Webtube]] exposes the
+  relevant HTTP header field ([[Sec-WebSocket-Protocol]]) to client-side user
+  code, it does not provide any sort of direct support, and explicitly
+  supporting subprotocols on the server side may be cumbersome.  A future
+  version of [[Webtube]] may provide a declarative way for configuring the
+  subprotocol negotiation: more explicitly expose the subprotocol field on the
+  client-side API, and providing parameters for declaring the supported
+  subprotocols and their order of precedence, or alternatively a hook to a more
+  complex subprotocol choie mechanism, on the server-side API.
+
+- On the server side, [[Webtube]] currently only actively integrates with
+  WEBrick.  A future version may also provide support for integration with
+  Puma, Sinatra, and/or EventMachine.
+
+- A future version of [[Webtube]] may provide an interface for explicitly
+  specifying the fragmentation strategy for outbound data messages instead of
+  relying on a one-size-fits-all [[PIPE_BUF]] bases approach.
+
+  - In particular, on systems exposing the results of Path MTU Discovery of
+    connected TCP sockets to userspace code, a future version of [[Webtube]]
+    may use these results to choose a message fragment size according to the
+    path's MTU.  (This will become nontrivial once compression and SSL get
+    involved.)
+
+- Currently, [[Webtube#run]] necessarily hogs its whole thread until the
+  connection closes.  A future version may, as an alternative, provide a more
+  incremental approach.  Some of the partially overlapping and partially
+  alternative approaches worth considering include:
+
+  - a [[receive_message]] method that would hang until a message arrives (buth
+    how would it interact with control frames?  Particularly, control frames
+    not defined by the standard?);
+
+  - an option for [[run]] to leave the loop after processing one incoming frame
+    or message;
+
+  - an option for [[run]] to leave the loop after passage of a given timeout;
+
+  - a non-blocking [[has_data?]] method that would check whether the underlying
+    [[Socket]] has at last one byte of data available;
+
+  - a non-blocking [[has_frame?]] method that would check whether the
+    underlying [[Socket]] has at least on complete WebSocket frame available
+    (if not, this would require storing the partial frame in a slot of
+    [[Webtube]] instead of a local variable of [[run]]).
+
+- The HTTP specification provides a mechanism for redirecting clients.  It is
+  not entirely clear how this should affect WebSocket clients, although there
+  are some obvious approaches.  A future version of [[Webtube::connect]] may
+  implement one or more of them.
+
+- A future version of the client API for [[Webtube]] may support transparent
+  automatic reconnection upon loss of connection while retaining the same
+  instance, subject to restrictions for thrashing and persisting failure.  This
+  may need lead to defining new events for the listener.
+
+- A future version of [[Webtube]] may provide for a higher-level interface, for
+  example, by transparently JSON-encoding and -decoding objects as they are
+  transmitted and received.
+
+- A future version of [[Webtube]] may implement a 'queue of unhandled messages'
+  inside the [[Webtube]] instance (or more likely, inside an instance of its
+  subclass), define a mechanism (or several) for matching outbound and inbound
+  messages, and provide for a synchronous method that would transmit a message
+  and wait until receipt of a matching response, storing messages arriving in
+  the intervening time for use by a future call of this method, or by
+  concurrent calls of this method from other threads.
+
+- A future version of [[Webtube]] may define a hook for the caller to manually
+  check the SSL certificate so as to facilitate secure SSL/TLS connections
+  using self-signed certificates validated using a custom procedure instead of
+  relying to a 'trusted third party' CA.
+
+  - Also, or alternatively, it may expose [[OpenSSL]]'s certificate
+    verification hooks.
+
+- A future version of [[Webtube::connect]] may explicitly support using a
+  client SSL certificate.
+
+- A future version of [[Webtube::connect]] may expose the proxy configuration
+  subsystem of [[Net::HTTP]].
+
+- The current implementation of [[Webtube#send_message]] uses a string (and
+  thus, implicitly, [[RuntimeError]]), rather than an explicit subclass of
+  [[Exception]], to report attempt to transmit data through a dead WebSocket.
+  A future version of [[Webtube]] is likely to provide such an explicit
+  subclass of defined ancestry.  It is not currently clear whether this should
+  inherit from [[Webtube::ProtocolError]]; arguments both ways are conceivable.
+
+- A future version of [[Webtube]] may offer a better differentiation between
+  reasons of a WebSocket's closure.
+
+- A future version of [[Webtube]] may perhaps define listener event(s) for
+  outbound messages as well as inbound ones.
+
+- A future version of [[Webtube]] may define parameters for setting the
+  [[IP_TOS]] and [[IP_TTL]] socket options.
+
+- The WebSocket protocol specification has a strict rule against multiple
+  WebSocket connections between the same pair of endpoints being simultaneously
+  in the /connecting/ state.  [[Webtube]] is currently not implementing or
+  enforcing this.  A future version may provide a serialisation mechanism.
+
+- A future version of [[Webtube]] may provide an explicit mechanism for
+  transmitting hand-crafted [[Frame]] instances.
+
+  - This will probably need a better abstraction for frame masking.
+
+- A future version of [[Webtube]] may provide a standalone WebSocket server
+  implementing only the minimal needed amount of HTTP/1.1.
+
+  - This will need a mechanism for [[Webtube]] to validate the [[Origin]]
+    header field in the request.  This is currently not implemented (but may be
+    implemented in a future version.)
+
+
+== Copyright and licensing
+
+Webtube is copyright (c) 2014 by Andres Soolo and Knitten Development OÜ.
+Webtube is published as free software under the terms and conditions of the
+GNU General Public License version 3.
+
+It is the default policy of us at Knitten Development to release our free
+software under the GPL v3, which we believe provides a reasonable and
+well-considered, if somewhat conservative, balance between the interests and
+concerns of producers, consumers, and prosumers of free software.  However, we
+realise that some users of our free software may be better served by other
+balances.  For this reason, Knitten Development would like it be known that:
+
+- we are willing to consider, on a case-by-case basis, offering packages of our
+  free software optionally also under certain other open source software
+  licenses, as certified by the Open Source Initiative(tm), provided that this
+  furthers the creation or advancement of specific free software projects that
+  Knitten Development may find worthwile, at our discretion; and
+
+- we are available to negotiate standard non-exclusive commercial licenses for
+  free software that we have released, in exchange for a reasonable fee.
+
+For any enquiries, please write to <licensing@knitten-dev.co.uk>.
