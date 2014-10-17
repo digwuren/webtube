@@ -63,6 +63,15 @@ class << $listener = Object.new
     return
   end
 
+  def oncontrolframe webtube, frame
+    # We'll ignore 9 (ping) and 10 (pong) here, as they are already processed
+    # by handlers of their own.
+    unless [9, 10].include? frame.opcode then
+      puts "*#{'%X' % opcode}* #{frame.payload.inspect}"
+    end
+    return
+  end
+
   def onping webtube, frame
     puts "*** ping #{frame.payload.inspect}"
     return
@@ -123,7 +132,12 @@ $send_thread = Thread.current
 # [[Webtube#run]] will hog the whole thread it runs on, so we'll give it a
 # thread of its own.
 $recv_thread = Thread.new do
-  $webtube.run $listener
+  begin
+    $webtube.run $listener
+  rescue Exception => e
+    $stderr.puts "Exception in receive thread: #{$!}", $@
+    $send_thread.exit 1 # terminate the main thread
+  end
 end
 
 # Now, read user input and interpret commands.
