@@ -34,7 +34,7 @@ class Webtube
           # outgoing data.  If false, we will expect incoming data unmasked and
           # will mask outgoing data.
       allow_rsv_bits: 0,
-      allow_opcodes: [Webtube::OPCODE_TEXT, Webtube::OPCODE_BINARY],
+      allow_opcodes: [Webtube::OPCODE_TEXT],
       close_socket: true
     super()
     @socket = socket
@@ -67,14 +67,12 @@ class Webtube
   #   passed to it as a [[String]], encoded in [[UTF-8]] for [[OPCODE_TEXT]]
   #   messages and in [[ASCII-8BIT]] for all the other message opcodes.
   #
-  # - onannoyedclose(webtube, frame) will be called upon receipt of an
-  #   [[OPCODE_CLOSE]] frame with an explicit status code other than 1000.
-  #   This typically indicates that the other side is annoyed, so the listener
-  #   may want to log the condition for debugging or further analysis.
-  #   Normally, once the handler returns, [[Webtube]] will respond with a close
-  #   frame of the same status code and close the connection, but the handler
-  #   may call [[Webtube#close]] to request a closure with a different status
-  #   code or without one.
+  # - oncontrolframe(webtube, frame) will be called upon receipt of a control
+  #   frame whose opcode is listed in the [[allow_opcodes]] parameter of this
+  #   [[Webtube]] instance.  The frame is repreented by an instance of
+  #   [[Webtube::Frame]].  Note that [[Webtube]] handles connection closures
+  #   ([[OPCODE_CLOSE]]) and ponging all the pings ([[OPCODE_PING]])
+  #   automatically.
   #
   # - onping(webtube, frame) will be called upon receipt of an [[OPCODE_PING]]
   #   frame.  [[Webtube]] will take care of ponging all the pings, but the
@@ -86,12 +84,21 @@ class Webtube
   # - onclose(webtube) will be called upon closure of the connection, for any
   #   reason.
   #
+  # - onannoyedclose(webtube, frame) will be called upon receipt of an
+  #   [[OPCODE_CLOSE]] frame with an explicit status code other than 1000.
+  #   This typically indicates that the other side is annoyed, so the listener
+  #   may want to log the condition for debugging or further analysis.
+  #   Normally, once the handler returns, [[Webtube]] will respond with a close
+  #   frame of the same status code and close the connection, but the handler
+  #   may call [[Webtube#close]] to request a closure with a different status
+  #   code or without one.
+  #
   # - onexception(webtube, exception) will be called if an unhandled exception
   #   is raised during the [[Webtube]]'s lifecycle, including all of the
   #   listener event handlers.  It may log the exception but should return
   #   normally so that the [[Webtube]] can issue a proper close frame for the
   #   other end and invoke the [[onclose]] handler, after which the exception
-  #   will be raised again so the caller of [[Webtube::new]] will have a chance
+  #   will be raised again so the caller of [[Webtube#run]] will have a chance
   #   of handling it.
   #
   # Before calling any of the handlers, [[respond_to?]] will be used to check
@@ -190,8 +197,13 @@ class Webtube
               listener.onpong self, frame if listener.respond_to? :onpong
               # ignore
             else
-              raise Webtube::UnknownOpcode.new(frame: frame)
+              unless @allow_opcodes.include? frame.opcode then
+                raise Webtube::UnknownOpcode.new(frame: frame)
+              end
             end
+            listener.oncontrolframe self, frame \
+                if @allow_opcodes.include?(frame.opcode) and
+                    listener.respond_to?(:oncontrolframe)
           else
             raise 'assertion failed'
           end
@@ -287,7 +299,7 @@ class Webtube
       ssl_verify_mode: nil,
       on_http_response: nil,
       allow_rsv_bits: 0,
-      allow_opcodes: [Webtube::OPCODE_TEXT, Webtube::OPCODE_BINARY],
+      allow_opcodes: [Webtube::OPCODE_TEXT],
       close_socket: true
     # We'll replace the WebSocket protocol prefix with an HTTP-based one so
     # [[URI::parse]] would know how to parse the rest of the URL.
@@ -507,9 +519,6 @@ class Webtube
     # other thread will consume bytes from the socket inbetween.  In a
     # multithreaded environment, it may be necessary to apply external
     # locking.
-    #
-    # If EOF happens before the frame will be completely read, will raise
-    # [[Webtube::BrokenFrame]].
     #
     def self::read_from_socket socket
       header = socket.read(2)
