@@ -654,7 +654,7 @@ opaque.
 
 - A future version of [[Webtube]] may provide an interface for explicitly
   specifying the fragmentation strategy for outbound data messages instead of
-  relying on a one-size-fits-all [[PIPE_BUF]] bases approach.
+  relying on a one-size-fits-all [[PIPE_BUF]] based approach.
 
   - In particular, on systems exposing the results of Path MTU Discovery of
     connected TCP sockets to userspace code, a future version of [[Webtube]]
