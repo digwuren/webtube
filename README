@@ -159,7 +159,7 @@ A WebSocket connection to a remote server can be set up by calling
       ssl_verify_mode: nil,
       on_http_response: nil,
       allow_rsv_bits: 0,
-      allow_opcodes: [Webtube::OPCODE_TEXT, Webtube::OPCODE_BINARY],
+      allow_opcodes: [Webtube::OPCODE_TEXT],
       close_socket: true)
 
 - [[url]] is a [[String]] representing the target of the connection in the URL
