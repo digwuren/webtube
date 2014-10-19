@@ -20,6 +20,26 @@ There is NO WARRANTY, to the extent permitted by law.
 
 "
 
+USAGE = "Usage: wsc [options] ws[s]://host[:port][/path]
+
+Interact with a WebSocket server, telnet-style.
+
+--header, -H=name:value
+    Use the given HTTP header field in the request.
+
+--insecure, -k
+    Allow connecting to an SSL server with invalid certificate.
+
+--help
+    Print this usage.
+
+--version
+    Show version data.
+
+Report bugs to: <dig@mirky.net>
+
+"
+
 $header = {} # lowercased field name => value
 $insecure = false
 
@@ -28,6 +48,7 @@ begin
   GetoptLong.new(
       ['--header', '-H', GetoptLong::REQUIRED_ARGUMENT],
       ['--insecure', '-k', GetoptLong::NO_ARGUMENT],
+      ['--help', GetoptLong::NO_ARGUMENT],
       ['--version', GetoptLong::NO_ARGUMENT],
       ).each do |opt, arg|
     case opt
@@ -46,6 +67,9 @@ begin
       end
     when '--insecure' then
       $insecure = true
+    when '--help' then
+      puts USAGE
+      exit 0
     when '--version' then
       puts VERSION_DATA
       exit 0
