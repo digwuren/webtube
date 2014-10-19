@@ -40,6 +40,32 @@ Report bugs to: <dig@mirky.net>
 
 "
 
+ONLINE_HELP = "WebSocketCat's commands are slash-prefixed.
+
+/ping [message]
+  Send a ping frame to the server.
+
+/close [status [explanation]]
+  Send a close frame to the server.  The status code is specified as an
+  unsigned decimal number.
+
+/N [payload]
+  Send a message or control frame of opcode [[N]], given as a single hex digit,
+  to the server.  Per protocol specification, [[/1]] is text message, [[/2]] is
+  binary message, [[/8]] is close, [[/9]] is ping, [[/A]] is pong.  Other
+  opcodes can have application-specific meaning.  Note that the specification
+  requires kicking clients (or servers) who send messages so cryptic that the
+  server (or client) can't understand them.
+
+/help
+  Show this online help.
+
+If you need to start a text message with a slash, you can double it for escape,
+or you can use the explicit [[/1]] command.  EOF from stdin is equivalent to
+[[/close 1000]].
+
+"
+
 $header = {} # lowercased field name => value
 $insecure = false
 
@@ -201,6 +227,8 @@ begin
     when /\A\/close\b\s+(\d+)\s*/ then
       $webtube.close $1.to_i, $'
       puts "(Close sent.)"
+    when /\A\/help\s*\Z/ then
+      puts ONLINE_HELP
     else
       $webtube.send_message line
     end

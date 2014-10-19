@@ -117,6 +117,8 @@ some special commands using the slash prefix:
   specification requires kicking clients (or servers) who send messages so
   cryptic that the server (or client) can't understand them.
 
+- [[/help]] shows online help.
+
 If you need to start a text message with a slash, you can double it for escape,
 or you can use the explicit [[/1]] command.  EOF from stdin is equivalent to
 [[/close 1000]].
