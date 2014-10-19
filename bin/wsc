@@ -6,6 +6,20 @@ require 'base64'
 require 'getoptlong'
 require 'webtube'
 
+VERSION_DATA = "WebSocketCat 1.0.0 (Webtube 1.0.0)
+Copyright (C) 2014 Andres Soolo
+Copyright (C) 2014 Knitten Development Ltd.
+
+Licensed under GPLv3+: GNU GPL version 3 or later
+  <http://gnu.org/licenses/gpl.html>
+
+This is free software: you are free to change and
+redistribute it.
+
+There is NO WARRANTY, to the extent permitted by law.
+
+"
+
 $header = {} # lowercased field name => value
 $insecure = false
 
@@ -14,6 +28,7 @@ begin
   GetoptLong.new(
       ['--header', '-H', GetoptLong::REQUIRED_ARGUMENT],
       ['--insecure', '-k', GetoptLong::NO_ARGUMENT],
+      ['--version', GetoptLong::NO_ARGUMENT],
       ).each do |opt, arg|
     case opt
     when '--header' then
@@ -31,6 +46,9 @@ begin
       end
     when '--insecure' then
       $insecure = true
+    when '--version' then
+      puts VERSION_DATA
+      exit 0
     else
       raise 'assertion failed'
     end
