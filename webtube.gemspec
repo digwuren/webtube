@@ -1,7 +1,7 @@
 Gem::Specification.new do |s|
   s.name = 'webtube'
   s.version = '1.0.0'
-  s.date = '2014-10-17'
+  s.date = '2014-10-19'
   s.homepage = 'https://github.com/digwuren/webtube'
   s.summary = 'A Ruby implementation of the [[WebSocket]] protocol'
   s.author = 'Andres Soolo'
