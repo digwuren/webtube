@@ -155,35 +155,77 @@ A WebSocket connection to a remote server can be set up by calling
 [[Webtube::connect]].  The calling interface goes like this:
 
   Webtube::connect(url,
-      header_fields: {},
-      ssl_verify_mode: nil,
-      on_http_response: nil,
       allow_rsv_bits: 0,
       allow_opcodes: [Webtube::OPCODE_TEXT],
-      close_socket: true)
+      http_header: {},
+      ssl_verify_mode: OpenSSL::SSL::VERIFY_PEER,
+      ssl_cert_store: nil,
+      tcp_connect_timeout: nil,
+      tcp_nodelay: true,
+      close_socket: true,
+      on_http_request: nil,
+      on_http_response: nil,
+      on_ssl_handshake: nil,
+      on_tcp_connect: nil)
+
+Only [[url]] is mandatory, and in most contexts, setting [[url]]
+and [[allow_opcodes]] is enough.  [[http_header]] is notable as
+a way to pass HTTP cookies along with the WebSocket connection
+request.
 
 - [[url]] is a [[String]] representing the target of the connection in the URL
   form, using either the [[ws:]] or [[wss:]] protocol prefix.  A convenient
   public server for basic testing is available on [[ws://echo.websocket.org/]].
 
-- [[header_fields]] is a [[Hash]] for specifying HTTP header fields for the
+- [[http_header]] is a [[Hash]] for specifying HTTP header fields for the
   request.  [[Webtube]] will consider entries specified here to have a priority
   over automatically created header fields even for the fields defined by the
-  WebSocket standard such as [[Upgrade]] and [[Sec-WebSocket-Key]]; this should
-  be used cautiously.
+  WebSocket standard such as [[Upgrade]] and [[Sec-WebSocket-Key]]; caution
+  should be exercised when using this feature.
 
-- [[ssl_verify_mode]], if not [[nil]] and if the connection is encrypted, will
-  override OpenSSL's default mode of verifying the certificate at the beginning
-  of the SSL or TLS session.  Supported values are
+- [[ssl_verify_mode]] will specify OpenSSL's mode of verifying the certificate
+  at the end of the SSL handshake.  Supported values are
   [[OpenSSL::SSL::VERIFY_PEER]] (the default, and the recommended value) and
-  [[OpenSSL::SSL::VERIFY_NONE]] (to be used with great caution).  If the [[url]]
-  parameter has an [[ws:]] prefix, so the connection is not to be encrypted,
-  [[ssl_verify_mode]] has no effect.
+  [[OpenSSL::SSL::VERIFY_NONE]] (to be used with great caution).  Not applicable
+  if the connection is not encrypted (that is, the [[url]] parameter has a
+  [[ws:]] rather than [[wss:]] prefix).
 
-- [[on_http_response]], if supplied, will be called with the
-  [[Net::HTTPResponse]] instance representing the server's HTTP-level response
-  to the request to initiate a WebSocket connection.  This allows the client
-  code, for an example, to display the response header fields to the user.
+- [[ssl_cert_store]], if given, should be a prepared [[OpenSSL::X509::Store]]
+  instance containing the trusted root certificates.  If not given, the system's
+  defaults are used.  Not applicable if the connection is not encrypted (that
+  is, the [[url]] parameter has a [[ws:]] rather than [[wss:]] prefix).
+
+- [[tcp_connect_timeout]], if given, specifies the number of seconds allotted
+  for establishing the TCP connection.  The [[Net::OpenTimeout]] exception will
+  be raised if the TCP handshake can not be completed within the given time.
+
+- [[tcp_nodelay]] specifies whether the [[TCP_NODELAY]] socket option should be
+  turned on, requesting that the Nagle's algorithm not be used.  The default is
+  [[true]], which may slightly reduce latency at the expense of bulk throughput.
+  Turning [[tcp_nodelay]] off will re-enable the Nagle's algorithm, which may
+  slightly improve bulk throughput at the expense of latency.
+
+- [[on_http_request]], if supplied, will be called with the HTTP-level request
+  to initiate a WebSocket connection, as a [[String]].  This allows the client
+  code, for an example, to display the request to the user.
+
+- [[on_http_response]], if supplied, will be called with the header of the
+  HTTP-level response to the request to initiate a WebSocket connection, as a
+  [[String]].  (In version 1.1.0, the string is reconstituted from a parsed
+  [[Net::HTTPResponse]], and may differ from the actual response in details that
+  usually do not matter, such as capitalisation of header fields' names.  In a
+  future version, the string may be a copy of the actual response.)  This allows
+  the client code, for an example, to display the response header to the
+  user.
+
+- [[on_ssl_handshake]], if supplied, will be called with the
+  [[OpenSSL::SSL::SSLSocket]] instance upon completion of the SSL handshake.
+  Not applicable if the connection is not encrypted (that is, the [[url]]
+  parameter has a [[ws:]] rather than [[wss:]] prefix).
+
+- [[on_tcp_connect]], if supplied, will be called with the [[TCPSocket]]
+  instance upon completion of the TCP handshake.
+
 
 The following fields will be passed on to [[Webtube::new]] intact:
 
@@ -310,11 +352,11 @@ can implement the following methods:
   to it as a [[String]], encoded in [[UTF-8]] for [[OPCODE_TEXT]] messages and
   in [[ASCII-8BIT]] for all the other message opcodes.
 
-- oncontrolframe(webtube, frame) will be called upon receipt of a control frame
-  whose opcode is listed in the [[allow_opcodes]] parameter of this [[Webtube]]
-  instance.  The frame is repreented by an instance of [[Webtube::Frame]].  Note
-  that [[Webtube]] handles connection closures ([[OPCODE_CLOSE]]) and ponging
-  all the pings ([[OPCODE_PING]]) automatically.
+- [[oncontrolframe(webtube, frame)]] will be called upon receipt of a control
+  frame whose opcode is listed in the [[allow_opcodes]] parameter of this
+  [[Webtube]] instance.  The frame is repreented by an instance of
+  [[Webtube::Frame]].  Note that [[Webtube]] handles connection closures
+  ([[OPCODE_CLOSE]]) and ponging all the pings ([[OPCODE_PING]]) automatically.
 
 - [[onping(webtube, frame)]] will be called upon receipt of an [[OPCODE_PING]]
   frame.  [[Webtube]] will take care of ponging all the pings, but the
@@ -405,8 +447,8 @@ version of [[Webtube]], the specific known subclasses are:
   [[data]] attribute holds the payload as a [[String]] instance of the
   [[ASCII-8BIT]] encoding.
 
-- [[Webtube::FragmenedControlFrame]] indicates receipt of a control frame whose
-[[FIN]] flag is not set.
+- [[Webtube::FragmentedControlFrame]] indicates receipt of a control frame whose
+  [[FIN]] flag is not set.
 
 Other exceptions representing TCP-level, HTTP-level, or infrastructure failures
 can also occur.
@@ -504,15 +546,14 @@ The following methods are user-serviceable:
   of the three ways defined by the protocol specification it is encoded, from
   the frame's header.
 
-- [[Webtube::Frame#mask]] extracts the mask of this frame, as a 4-byte
-  [[String]] encoded in [[ASCII-8BIT]], if the [[MSK]] flag is not set.  If it
-  is not set, this method returns [[nil]].
+- [[Webtube::Frame#mask]] extracts the mask of this frame, as an integer, if the
+  [[MSK]] flag is set.  If it is not set, this method returns [[nil]].
 
 - [[Webtube::Frame#payload]] retrieves the payload of this frame, demasking the
   frame's body if necessary.
 
 - [[Webtube::Frame::read_from_socket(socket)]] reads all the bytes of one
-  WebSocket frame from the given [[IO]] instance (which must provide data of
+  WebSocket frame from the given [[IO]] instance (which must provide data in
   the plain [[ASCII-8BIT]] encoding, and emphatically not a multibyte encoding)
   and returns a [[Webtube::Frame]] instance representing the frame, or raises
   [[Webtube::BrokenFrame]] if the inbound traffic ends before the whole frame
@@ -650,7 +691,7 @@ opaque.
 
 - On the server side, [[Webtube]] currently only actively integrates with
   WEBrick.  A future version may also provide support for integration with
-  Puma, Sinatra, and/or EventMachine.
+  Thin, Puma, Sinatra, and/or EventMachine.
 
 - A future version of [[Webtube]] may provide an interface for explicitly
   specifying the fragmentation strategy for outbound data messages instead of
@@ -717,8 +758,7 @@ opaque.
 - A future version of [[Webtube::connect]] may explicitly support using a
   client SSL certificate.
 
-- A future version of [[Webtube::connect]] may expose the proxy configuration
-  subsystem of [[Net::HTTP]].
+- A future version of [[Webtube::connect]] may provide support for web proxies.
 
 - The current implementation of [[Webtube#send_message]] uses a string (and
   thus, implicitly, [[RuntimeError]]), rather than an explicit subclass of
@@ -746,17 +786,10 @@ opaque.
 
   - This will probably need a better abstraction for frame masking.
 
-- A future version of [[Webtube]] may provide a standalone WebSocket server
-  implementing only the minimal needed amount of HTTP/1.1.
-
-  - This will need a mechanism for [[Webtube]] to validate the [[Origin]]
-    header field in the request.  This is currently not implemented (but may be
-    implemented in a future version.)
-
 
 == Copyright and licensing
 
-Webtube is copyright (c) 2014 by Andres Soolo and Knitten Development OÜ.
+Webtube is copyright (c) 2014-2018 by Andres Soolo and Knitten Development OÜ.
 Webtube is published as free software under the terms and conditions of the
 GNU General Public License version 3.
 
@@ -776,4 +809,4 @@ balances.  For this reason, Knitten Development would like it be known that:
 - we are available to negotiate standard non-exclusive commercial licenses for
   free software that we have released, in exchange for a reasonable fee.
 
-For any enquiries, please write to <licensing@knitten-dev.co.uk>.
+For any enquiries, please write to <dig@mirky.net>.

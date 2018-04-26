@@ -1,14 +1,15 @@
 #! /usr/bin/ruby
 
-# WebSocketCat, a primitive CLI tool for manually talking to WebSocket servers
+# WebSocketCat, a primitive CLI tool for manually talking to
+# WebSocket servers
 
 require 'base64'
 require 'getoptlong'
 require 'webtube'
 
-VERSION_DATA = "WebSocketCat 1.0.0 (Webtube 1.0.0)
-Copyright (C) 2014 Andres Soolo
-Copyright (C) 2014 Knitten Development Ltd.
+VERSION_DATA = "WebSocketCat 1.1.0 (Webtube 1.1.0)
+Copyright (C) 2014-2018 Andres Soolo
+Copyright (C) 2014-2018 Knitten Development Ltd.
 
 Licensed under GPLv3+: GNU GPL version 3 or later
   <http://gnu.org/licenses/gpl.html>
@@ -20,12 +21,15 @@ There is NO WARRANTY, to the extent permitted by law.
 
 "
 
-USAGE = "Usage: wsc [options] ws[s]://host[:port][/path]
+USAGE = "Usage: wsc [options] ws[s]://host[:port][/path][?query]
 
 Interact with a WebSocket server, telnet-style.
 
 --header, -H=name:value
     Use the given HTTP header field in the request.
+
+--cacert=FILENAME
+    Load trusted root certificate(s) from the given PEM file.
 
 --insecure, -k
     Allow connecting to an SSL server with invalid certificate.
@@ -46,33 +50,36 @@ ONLINE_HELP = "WebSocketCat's commands are slash-prefixed.
   Send a ping frame to the server.
 
 /close [status [explanation]]
-  Send a close frame to the server.  The status code is specified as an
-  unsigned decimal number.
+  Send a close frame to the server.  The status code is
+  specified as an unsigned decimal number.
 
 /N [payload]
-  Send a message or control frame of opcode [[N]], given as a single hex digit,
-  to the server.  Per protocol specification, [[/1]] is text message, [[/2]] is
-  binary message, [[/8]] is close, [[/9]] is ping, [[/A]] is pong.  Other
-  opcodes can have application-specific meaning.  Note that the specification
-  requires kicking clients (or servers) who send messages so cryptic that the
-  server (or client) can't understand them.
+  Send a message or control frame of opcode [[N]], given as a
+  single hex digit, to the server.  Per protocol specification,
+  [[/1]] is text message, [[/2]] is binary message, [[/8]] is
+  close, [[/9]] is ping, [[/A]] is pong.  Other opcodes can have
+  application-specific meaning.  Note that the specification
+  requires kicking clients (or servers) who send messages so
+  cryptic that the server (or client) can't understand them.
 
 /help
   Show this online help.
 
-If you need to start a text message with a slash, you can double it for escape,
-or you can use the explicit [[/1]] command.  EOF from stdin is equivalent to
-[[/close 1000]].
+If you need to start a text message with a slash, you can double
+it for escape, or you can use the explicit [[/1]] command.  EOF
+from stdin is equivalent to [[/close 1000]].
 
 "
 
 $header = {} # lowercased field name => value
 $insecure = false
+$cert_store = nil
 
 $0 = 'wsc' # for [[GetoptLong]] error reporting
 begin
   GetoptLong.new(
       ['--header', '-H', GetoptLong::REQUIRED_ARGUMENT],
+      ['--cacert', GetoptLong::REQUIRED_ARGUMENT],
       ['--insecure', '-k', GetoptLong::NO_ARGUMENT],
       ['--help', GetoptLong::NO_ARGUMENT],
       ['--version', GetoptLong::NO_ARGUMENT],
@@ -81,7 +88,8 @@ begin
     when '--header' then
       name, value = arg.split /\s*:\s*/, 2
       if value.nil? then
-        $stderr.puts "wsc: colon missing in argument to --header"
+        $stderr.puts "wsc: colon missing in argument to " +
+            "--header"
         exit 1
       end
       name.downcase!
@@ -91,6 +99,9 @@ begin
       else
         $header[name] = value
       end
+    when '--cacert' then
+      $cert_store ||= OpenSSL::X509::Store.new
+      $cert_store.add_file arg
     when '--insecure' then
       $insecure = true
     when '--help' then
@@ -113,8 +124,8 @@ unless ARGV.length == 1 then
   exit 1
 end
 
-# The events incoming over the WebSocket will be listened to by this object,
-# and promptly shown to the user.
+# The events incoming over the WebSocket will be listened to by
+# this object, and promptly shown to the user.
 
 class << $listener = Object.new
   def onopen webtube
@@ -132,8 +143,8 @@ class << $listener = Object.new
   end
 
   def oncontrolframe webtube, frame
-    # We'll ignore 9 (ping) and 10 (pong) here, as they are already processed
-    # by handlers of their own.
+    # We'll ignore 9 (ping) and 10 (pong) here, as they are
+    # already processed by handlers of their own.
     unless [9, 10].include? frame.opcode then
       puts "*#{'%X' % opcode}* #{frame.payload.inspect}"
     end
@@ -154,8 +165,9 @@ class << $listener = Object.new
     if frame.body.bytesize >= 2 then
       status_code, = frame.body.unpack 'n'
       message = frame.body.byteslice 2 .. -1
-      message.force_encoding 'UTF-8'
-      message.force_encoding 'ASCII-8BIT' unless message.valid_encoding?
+      message.force_encoding Encoding::UTF_8
+      message.force_encoding Encoding::ASCII_8BIT \
+          unless message.valid_encoding?
       message = nil if message.empty?
     else
       status_code = nil
@@ -179,26 +191,33 @@ end
 puts "Connecting to #{ARGV.first} ..."
 
 $webtube = Webtube.connect ARGV.first,
-    header_fields: $header,
+    http_header: $header,
     allow_opcodes: 1 .. 15,
-    ssl_verify_mode: $insecure ? OpenSSL::SSL::VERIFY_NONE : nil,
+    ssl_verify_mode: $insecure ?
+        OpenSSL::SSL::VERIFY_NONE :
+        OpenSSL::SSL::VERIFY_PEER,
+    ssl_cert_store: $cert_store,
+    on_http_request: proc{ |request|
+      # Show the HTTP request to the user
+      request.rstrip.each_line do |s|
+        puts "> #{s.rstrip}"
+      end
+      puts
+    },
     on_http_response: proc{ |response|
       # Show the HTTP response to the user
-      puts "| #{response.code} #{response.message}"
-      response.each_key do |key|
-        response.get_fields(key).each do |value|
-          puts "| #{key}: #{value}"
-        end
+      response.rstrip.each_line do |s|
+        puts "< #{s.rstrip}"
       end
       puts
     }
 
-# [[$listener]] will send us, via [[$send_thread]], the [[StopSendThread]]
-# exception when the other side goes away.
+# [[$listener]] will send us, via [[$send_thread]], the
+# [[StopSendThread]] exception when the other side goes away.
 $send_thread = Thread.current
 
-# [[Webtube#run]] will hog the whole thread it runs on, so we'll give it a
-# thread of its own.
+# [[Webtube#run]] will hog the whole thread it runs on, so we'll
+# give it a thread of its own.
 $recv_thread = Thread.new do
   begin
     $webtube.run $listener
