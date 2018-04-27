@@ -8,7 +8,7 @@ Gem::Specification.new do |s|
   s.email = 'dig@mirky.net'
   s.files = File.read('Manifest.txt').split(/\n/)
   s.executables << 'wsc'
-  s.license = 'GPL-3'
+  s.license = 'GPL-3.0'
   s.description = <<EOD
 Webtube is an implementation of the WebSocket protocol for Ruby.
 Some integration with the WEBrick server is also included.
